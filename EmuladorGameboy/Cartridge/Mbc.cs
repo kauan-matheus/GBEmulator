@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using System.Text;
 
-namespace EmuladorGameboy.Cartridge;
+namespace EmuladorGameboy.Cartridges;
 
 internal class Mbc
 {
