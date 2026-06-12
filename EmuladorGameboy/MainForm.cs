@@ -174,10 +174,8 @@ internal sealed class MainForm : Form
     {
         if (_emulator is null) return;
 
-        PollInput();
-
         byte[] frame;
-        try { frame = _emulator.RunFrame(); }
+        try { frame = _emulator.RunFrame(PollInput); }
         catch (NotImplementedException) { _timer.Stop(); return; }
 
         for (int i = 0; i < _pixels.Length; i++)
@@ -192,7 +190,7 @@ internal sealed class MainForm : Form
         _screen.Invalidate();
     }
 
-    /// <summary>Lê o teclado uma vez por quadro e repassa pro joypad.</summary>
+    /// <summary>Lê o teclado e atualiza o joypad. Chamado múltiplas vezes durante a emulação (reduz input lag).</summary>
     private void PollInput()
     {
         if (_emulator is null) return;

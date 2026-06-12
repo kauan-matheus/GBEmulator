@@ -35,16 +35,25 @@ internal sealed class Emulator
     /// Roda a emulação por um quadro inteiro e devolve a tela pronta (160x144).
     /// O segredo da sincronização: a cada instrução, a CPU diz quantos ciclos
     /// gastou, e nós avançamos PPU e timer pelo MESMO tanto.
+    /// O callback onInputRefresh (se fornecido) é chamado a cada ~256 ciclos para
+    /// ler o input com menor latência (~9x por frame em vez de 1x).
     /// </summary>
-    public byte[] RunFrame()
+    public byte[] RunFrame(Action? onInputRefresh = null)
     {
         int elapsed = 0;
+        int nextInputCheck = 256;
         while (elapsed < CyclesPerFrame)
         {
             int cycles = Cpu.Step();
             Ppu.Step(cycles);
             Timer.Step(cycles);
             elapsed += cycles;
+
+            if (elapsed >= nextInputCheck)
+            {
+                onInputRefresh?.Invoke();
+                nextInputCheck += 256;
+            }
         }
         return Ppu.Frame;
     }
