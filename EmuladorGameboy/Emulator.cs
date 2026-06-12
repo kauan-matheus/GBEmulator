@@ -1,45 +1,51 @@
 using EmuladorGameboy.Cartridges;
 using EmuladorGameboy.Core;
+using EmuladorGameboy.Graphics;
+using EmuladorGameboy.Input;
 
 namespace EmuladorGameboy;
 
 /// <summary>
-/// O "core" do emulador: cria e conecta os componentes (Cartridge, MMU, CPU) e
-/// oferece o laço de execução. É o dono de tudo — a UI, mais tarde, vai falar
-/// só com esta classe.
+/// O "core": cria e conecta todos os componentes e roda a emulação por quadros.
 /// </summary>
 internal sealed class Emulator
 {
+    // Um quadro do Game Boy dura 70224 T-cycles (154 linhas x 456 dots).
+    private const int CyclesPerFrame = 70224;
+
     public Cartridge Cartridge { get; }
     public Mmu Mmu { get; }
+    public Ppu Ppu { get; }
+    public GbTimer Timer { get; }
+    public Joypad Joypad { get; }
     public Cpu Cpu { get; }
 
     public Emulator(string romPath)
     {
-        // Ordem importa: a MMU precisa do cartucho; a CPU precisa da MMU.
         Cartridge = new Cartridge(romPath);
         Mmu = new Mmu(Cartridge);
+        Ppu = new Ppu(Mmu);
+        Timer = new GbTimer(Mmu);
+        Joypad = new Joypad(Mmu);
+        Mmu.Attach(Ppu, Timer, Joypad);  // liga as referências cruzadas
         Cpu = new Cpu(Mmu);
     }
 
     /// <summary>
-    /// Executa N instruções imprimindo o estado antes de cada uma (modo trace,
-    /// só para depuração). Se topar num opcode não implementado, mostra qual e para.
+    /// Roda a emulação por um quadro inteiro e devolve a tela pronta (160x144).
+    /// O segredo da sincronização: a cada instrução, a CPU diz quantos ciclos
+    /// gastou, e nós avançamos PPU e timer pelo MESMO tanto.
     /// </summary>
-    public void RunTraced(int instructions)
+    public byte[] RunFrame()
     {
-        for (int i = 0; i < instructions; i++)
+        int elapsed = 0;
+        while (elapsed < CyclesPerFrame)
         {
-            Console.WriteLine("  " + Cpu.TraceLine());
-            try
-            {
-                Cpu.Step();
-            }
-            catch (NotImplementedException ex)
-            {
-                Console.WriteLine("  >> " + ex.Message);
-                break;
-            }
+            int cycles = Cpu.Step();
+            Ppu.Step(cycles);
+            Timer.Step(cycles);
+            elapsed += cycles;
         }
+        return Ppu.Frame;
     }
 }

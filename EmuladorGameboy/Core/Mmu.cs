@@ -1,76 +1,101 @@
 using EmuladorGameboy.Cartridges;
+using EmuladorGameboy.Graphics;
+using EmuladorGameboy.Input;
 
 namespace EmuladorGameboy.Core;
 
 /// <summary>
-/// MMU (Memory Management Unit) / barramento de memória.
-///
-/// A CPU só sabe fazer duas coisas com o mundo externo: ler e escrever um byte
-/// num endereço de 16 bits. É a MMU que decide QUEM responde por cada faixa de
-/// endereços — ROM, VRAM, RAM de trabalho, OAM, registradores de I/O, HRAM...
-/// É literalmente o "switch de endereços" do diagrama de blocos.
-///
-/// Por isso a classe Memory.cs do esqueleto fica obsoleta: o papel dela (guardar
-/// os arrays crus de RAM) foi absorvido aqui dentro da MMU.
+/// MMU / barramento de memória. A CPU só lê/escreve bytes; a MMU decide QUEM
+/// responde por cada endereço e encaminha pro componente certo:
+///   ROM/RAM externa -> Cartridge (com banking pelo MBC)
+///   VRAM/OAM/regs de vídeo -> PPU
+///   timer -> GbTimer        joypad -> Joypad
+/// e guarda diretamente a WRAM, a HRAM e os registradores de I/O restantes.
 /// </summary>
 internal sealed class Mmu
 {
     private readonly Cartridge _cartridge;
+    private Ppu _ppu = null!;
+    private GbTimer _timer = null!;
+    private Joypad _joypad = null!;
 
-    // Os "chips de memória" do console, cada um um array de bytes:
-    private readonly byte[] _vram = new byte[0x2000]; // 0x8000-0x9FFF  vídeo
-    private readonly byte[] _eram = new byte[0x2000]; // 0xA000-0xBFFF  RAM do cartucho (MBC depois)
-    private readonly byte[] _wram = new byte[0x2000]; // 0xC000-0xDFFF  RAM de trabalho
-    private readonly byte[] _oam  = new byte[0x00A0]; // 0xFE00-0xFE9F  atributos de sprites
-    private readonly byte[] _io   = new byte[0x0080]; // 0xFF00-0xFF7F  registradores de I/O
-    private readonly byte[] _hram = new byte[0x007F]; // 0xFF80-0xFFFE  RAM rápida (alta)
-    private byte _ie;                                 // 0xFFFF         interrupt enable
+    private readonly byte[] _wram = new byte[0x2000]; // 0xC000-0xDFFF
+    private readonly byte[] _hram = new byte[0x007F]; // 0xFF80-0xFFFE
+    private readonly byte[] _io = new byte[0x0080];   // 0xFF00-0xFF7F (som, serial, IF...)
+    private byte _ie;                                 // 0xFFFF
 
     public Mmu(Cartridge cartridge) => _cartridge = cartridge;
 
-    /// <summary>Lê um byte de qualquer endereço — roteando pro dono certo.</summary>
-    public byte ReadByte(ushort addr) => addr switch
+    /// <summary>Liga os componentes que a MMU precisa rotear (evita dependência circular no construtor).</summary>
+    public void Attach(Ppu ppu, GbTimer timer, Joypad joypad)
     {
-        <= 0x7FFF => _cartridge.ReadRom(addr),     // ROM do cartucho
-        <= 0x9FFF => _vram[addr - 0x8000],
-        <= 0xBFFF => _eram[addr - 0xA000],
-        <= 0xDFFF => _wram[addr - 0xC000],
-        <= 0xFDFF => _wram[addr - 0xE000],         // Echo RAM: espelha 0xC000-0xDDFF
-        <= 0xFE9F => _oam[addr - 0xFE00],
-        <= 0xFEFF => 0xFF,                         // região proibida pelo hardware
-        <= 0xFF7F => _io[addr - 0xFF00],
-        <= 0xFFFE => _hram[addr - 0xFF80],
-        _         => _ie,                          // 0xFFFF
-    };
+        _ppu = ppu;
+        _timer = timer;
+        _joypad = joypad;
+    }
 
-    /// <summary>Escreve um byte em qualquer endereço.</summary>
+    /// <summary>Liga um bit em IF (0xFF0F): é assim que PPU/Timer/Joypad "avisam" a CPU.</summary>
+    public void RequestInterrupt(int bit) => _io[0x0F] |= (byte)(1 << bit);
+
+    public byte ReadByte(ushort addr)
+    {
+        switch (addr)
+        {
+            case <= 0x7FFF: return _cartridge.ReadRom(addr);
+            case <= 0x9FFF: return _ppu.ReadVram(addr);
+            case <= 0xBFFF: return _cartridge.ReadRam(addr);
+            case <= 0xDFFF: return _wram[addr - 0xC000];
+            case <= 0xFDFF: return _wram[addr - 0xE000];          // Echo RAM
+            case <= 0xFE9F: return _ppu.ReadOam(addr);
+            case <= 0xFEFF: return 0xFF;                          // proibida
+            case 0xFF00: return _joypad.Read();
+            case >= 0xFF04 and <= 0xFF07: return _timer.ReadRegister(addr);
+            case >= 0xFF40 and <= 0xFF4B: return _ppu.ReadRegister(addr);
+            case <= 0xFF7F: return _io[addr - 0xFF00];
+            case <= 0xFFFE: return _hram[addr - 0xFF80];
+            default: return _ie;                                  // 0xFFFF
+        }
+    }
+
     public void WriteByte(ushort addr, byte value)
     {
         switch (addr)
         {
-            // Escrever na faixa de ROM NÃO grava nada: no hardware real, isso é
-            // interpretado pelo chip MBC como um comando de banking (Fase 9).
-            case <= 0x7FFF: break;
-            case <= 0x9FFF: _vram[addr - 0x8000] = value; break;
-            case <= 0xBFFF: _eram[addr - 0xA000] = value; break;
+            case <= 0x7FFF: _cartridge.WriteRom(addr, value); break; // comandos do MBC
+            case <= 0x9FFF: _ppu.WriteVram(addr, value); break;
+            case <= 0xBFFF: _cartridge.WriteRam(addr, value); break;
             case <= 0xDFFF: _wram[addr - 0xC000] = value; break;
-            case <= 0xFDFF: _wram[addr - 0xE000] = value; break; // Echo RAM
-            case <= 0xFE9F: _oam[addr - 0xFE00] = value; break;
-            case <= 0xFEFF: break;                                // proibida
+            case <= 0xFDFF: _wram[addr - 0xE000] = value; break;
+            case <= 0xFE9F: _ppu.WriteOam(addr, value); break;
+            case <= 0xFEFF: break;
+            case 0xFF00: _joypad.Write(value); break;
+            case >= 0xFF04 and <= 0xFF07: _timer.WriteRegister(addr, value); break;
+            case 0xFF46: DoOamDma(value); break;                     // OAM DMA
+            case >= 0xFF40 and <= 0xFF4B: _ppu.WriteRegister(addr, value); break;
             case <= 0xFF7F: _io[addr - 0xFF00] = value; break;
             case <= 0xFFFE: _hram[addr - 0xFF80] = value; break;
-            default: _ie = value; break;                          // 0xFFFF
+            default: _ie = value; break;
         }
     }
 
-    // --- Acessos de 16 bits ---
-    // LEMBRE: o Game Boy é LITTLE-ENDIAN. O byte BAIXO mora no endereço menor.
+    /// <summary>
+    /// OAM DMA: escrever em 0xFF46 copia 160 bytes de (value*0x100) para a OAM.
+    /// Os jogos usam isso TODO quadro pra atualizar os sprites de uma vez.
+    /// </summary>
+    private void DoOamDma(byte value)
+    {
+        ushort src = (ushort)(value << 8);
+        for (int i = 0; i < 0xA0; i++)
+            _ppu.WriteOam((ushort)(0xFE00 + i), ReadByte((ushort)(src + i)));
+    }
+
+    // 16 bits, sempre little-endian (byte baixo primeiro).
     public ushort ReadWord(ushort addr)
         => (ushort)(ReadByte(addr) | (ReadByte((ushort)(addr + 1)) << 8));
 
     public void WriteWord(ushort addr, ushort value)
     {
-        WriteByte(addr, (byte)value);                 // byte baixo primeiro
-        WriteByte((ushort)(addr + 1), (byte)(value >> 8)); // depois o alto
+        WriteByte(addr, (byte)value);
+        WriteByte((ushort)(addr + 1), (byte)(value >> 8));
     }
 }
